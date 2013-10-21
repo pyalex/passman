@@ -20,6 +20,9 @@ MONGO_NAME = 'passman'
 SERVER_PORT = 8080
 
 
+logger_app = logging.getLogger('tornado.application')
+
+
 class PassManActionMixin(object):
     storage = None
 
@@ -107,24 +110,32 @@ class PassManWebSocket(PassManActionMixin, tornado.websocket.WebSocketHandler):
 
     @tornado.gen.coroutine
     def on_message(self, message):
+        logger_app.info(message)
+
         try:
             message = json.loads(message)
         except (TypeError, ValueError):
             self.write_error('Invalid message format')
             return
+        logger_app.info(message)
 
         if not self.check_signature(message):
             self.write_error('Invalid sign')
             return
+        logger_app.info('sign checked')
 
         action = message.get('action')
         if not action or action not in self.actions:
             self.write_error('Invalid action')
             return
 
+        logger_app.info(action)
+
         response = (yield self.actions[action](message, self.user_id)) or {}
         response.update(status='success')
         self.write_message(response)
+
+        logger_app.info(response)
 
     def write_error(self, error):
         self.write_message(dict(message=error, status='error'))
@@ -207,11 +218,8 @@ if __name__ == '__main__':
     server.listen(SERVER_PORT)
 
     logger = logging.getLogger('tornado.general')
-    logger.addHandler(logging.StreamHandler())
     logger.setLevel(logging.DEBUG)
 
-    logger_app = logging.getLogger('tornado.application')
-    logger.addHandler(logging.StreamHandler())
-    logger.setLevel(logging.DEBUG)
+    logger_app.setLevel(logging.DEBUG)
 
     tornado.ioloop.IOLoop.instance().start()
