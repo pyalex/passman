@@ -12,6 +12,7 @@ import tornado.gen
 
 import pika
 import asyncmongo
+import logging
 
 MONGO_HOST = '127.0.0.1'
 MONGO_PORT = 27017
@@ -204,5 +205,13 @@ if __name__ == '__main__':
     ])
     server = tornado.httpserver.HTTPServer(application)
     server.listen(SERVER_PORT)
+
+    logger = logging.getLogger('tornado.general')
+    logger.addHandler(logging.StreamHandler())
+    logger.setLevel(logging.DEBUG)
+
+    logger_app = logging.getLogger('tornado.application')
+    logger.addHandler(logging.StreamHandler())
+    logger.setLevel(logging.DEBUG)
 
     tornado.ioloop.IOLoop.instance().start()
