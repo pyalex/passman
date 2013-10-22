@@ -36,7 +36,7 @@ class PassManActionMixin(object):
     @tornado.gen.coroutine
     def update(self, message, user_id):
         dt = datetime.datetime.now()
-        for record_id, data in message.get('records', {}).iteritems():
+        for record_id, data in message.get('records', []):
             yield tornado.gen.Task(
                 self.storage.update,
                 dict(record_id=record_id, user_id=ObjectId(user_id)),
@@ -67,9 +67,9 @@ class PassManActionMixin(object):
             )
         )).args[0]
 
-        records = {}
+        records = []
         for row in rows:
-            records[row['record_id']] = row['data']
+            records.append((row['record_id'], row['data']))
 
         raise tornado.gen.Return(dict(upd_time=timestamp, records=records, sign=self.generate_sign(records)))
 
@@ -118,7 +118,7 @@ class PassManWebSocket(PassManActionMixin, tornado.websocket.WebSocketHandler):
 
     def generate_sign(self, records):
         return hashlib.sha1(
-            str(hashlib.md5(json.dumps(records or {})).hexdigest()) +
+            str(hashlib.md5(json.dumps(records or [])).hexdigest()) +
             str(hashlib.md5(self.sign_key or '').hexdigest())
         ).hexdigest()
 
