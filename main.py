@@ -107,8 +107,10 @@ class PassManWebSocket(PassManActionMixin, tornado.websocket.WebSocketHandler):
 
     def on_notify(self, message):
         if self.skip_notification:
-            self.write_message(message)
-            self.skip_notification = False
+            return
+        
+        self.write_message(message)
+        self.skip_notification = False
 
     def send_notification(self, dt):
         self.skip_notification = True
