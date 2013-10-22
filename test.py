@@ -58,7 +58,6 @@ class PassmanWebSocketTest(tornado.testing.AsyncHTTPTestCase):
 
     @tornado.testing.gen_test
     def test_successful_sign_check(self):
-        self.io_loop
         client = yield tornado.websocket.websocket_connect(self.get_url('/websocket?app_id=111'), self.io_loop)
 
         client.write_message(json.dumps(self.sign_message({'action': 'get_updates'})))

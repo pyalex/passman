@@ -1,24 +1,24 @@
 import json
-import datetime
 import time
 import uuid
 import hashlib
+import logging
+import datetime
 
 import tornado.ioloop
 import tornado.web
 import tornado.httpserver
 import tornado.websocket
 import tornado.gen
+import tornado.concurrent
 
-import pika
 import asyncmongo
-import logging
+from bson.objectid import ObjectId
 
-MONGO_HOST = '127.0.0.1'
-MONGO_PORT = 27017
-MONGO_NAME = 'passman'
-SERVER_PORT = 8080
+from notificator import QueueClient
+from utils import to_future
 
+import settings
 
 logger_app = logging.getLogger('tornado.application')
 
@@ -35,18 +35,21 @@ class PassManActionMixin(object):
 
     @tornado.gen.coroutine
     def update(self, message, user_id):
+        dt = datetime.datetime.now()
         for record_id, data in message.get('records', {}).iteritems():
             yield tornado.gen.Task(
                 self.storage.update,
-                dict(record_id=record_id, user_id=user_id),
+                dict(record_id=record_id, user_id=ObjectId(user_id)),
                 dict(
                     record_id=record_id,
-                    user_id=user_id,
+                    user_id=ObjectId(user_id),
                     data=data,
-                    updated_at=datetime.datetime.now()
+                    updated_at=dt
                 ),
                 upsert=True
             )
+
+        self.send_notification(dt)
 
     @tornado.gen.coroutine
     def get_updates(self, message, user_id):
@@ -59,7 +62,7 @@ class PassManActionMixin(object):
         rows = (yield tornado.gen.Task(
             self.storage.find,
             dict(
-                user_id=user_id,
+                user_id=ObjectId(user_id),
                 updated_at={'$gte': dt}
             )
         )).args[0]
@@ -78,14 +81,15 @@ class PassManWebSocket(PassManActionMixin, tornado.websocket.WebSocketHandler):
     def __init__(self, application, request, **kwargs):
         tornado.websocket.WebSocketHandler.__init__(self, application, request, **kwargs)
 
-        self.mongo_conn = asyncmongo.Client(pool_id='storage', host=MONGO_HOST, port=MONGO_PORT)
+        self.mongo_conn = asyncmongo.Client(pool_id='storage', host=settings.MONGO_HOST, port=settings.MONGO_PORT)
         self.app_id = request.arguments.get('app_id')[0] if request.arguments.get('app_id') else None
+        self.skip_notification = False
 
 
     @tornado.gen.coroutine
     def open(self):
-        self.storage = self.mongo_conn.connection(collectionname='records', dbname=MONGO_NAME)
-        credentials = self.mongo_conn.connection(collectionname='credentials', dbname=MONGO_NAME)
+        self.storage = self.mongo_conn.connection(collectionname='records', dbname=settings.MONGO_NAME)
+        credentials = self.mongo_conn.connection(collectionname='credentials', dbname=settings.MONGO_NAME)
 
         user = (yield tornado.gen.Task(
             credentials.find_one,
@@ -96,8 +100,21 @@ class PassManWebSocket(PassManActionMixin, tornado.websocket.WebSocketHandler):
             self.write_error('Try authorize before')
             self.close()
 
-        self.user_id = user['user_id']
+        self.user_id = str(user['user_id'])
         self.sign_key = user['sign_key']
+
+        self.application.queue.add_event_listener(self, self.user_id)
+
+    def on_notify(self, message):
+        if self.skip_notification:
+            self.write_message(message)
+            self.skip_notification = False
+
+    def send_notification(self, dt):
+        self.skip_notification = True
+        self.application.queue.send_notification(self.user_id, dict(
+            new=int(time.mktime(dt.timetuple()))
+        ))
 
     def generate_sign(self, records):
         return hashlib.sha1(
@@ -106,6 +123,9 @@ class PassManWebSocket(PassManActionMixin, tornado.websocket.WebSocketHandler):
         ).hexdigest()
 
     def check_signature(self, message):
+        if not message.get('records'):
+            return True
+
         return message.get('sign') == self.generate_sign(message.get('records'))
 
     @tornado.gen.coroutine
@@ -141,34 +161,54 @@ class PassManWebSocket(PassManActionMixin, tornado.websocket.WebSocketHandler):
         self.write_message(dict(message=error, status='error'))
 
     def on_close(self):
-        print 'close'
+        self.application.queue.remove_event_listener(self, self.user_id)
 
 
-class TokenHandler(tornado.web.RequestHandler):
+
+class ExceptionHandlerMixin(object):
+    def _handle_request_exception(self, e):
+        if self._finished:
+            return
+
+        try:
+            raise e
+        except asyncmongo.errors.IntegrityError:
+            self.set_status(400)
+        except asyncmongo.errors.Error:
+            self.set_status(500)
+        except:
+            super(ExceptionHandlerMixin, self)._handle_request_exception(e)
+
+        if not self._finished:
+            self.write(dict(status='error', message=str(e)))
+            self.finish()
+
+
+class TokenHandler(ExceptionHandlerMixin, tornado.web.RequestHandler):
     SUPPORTED_METHODS = ('POST', )
 
     @tornado.web.asynchronous
     @tornado.gen.coroutine
     def post(self, *args, **kwargs):
-        mongo_conn = asyncmongo.Client(pool_id='credentials', host=MONGO_HOST, port=MONGO_PORT, dbname=MONGO_NAME)
+        mongo_conn = asyncmongo.Client(pool_id='credentials', host=settings.MONGO_HOST, port=settings.MONGO_PORT, dbname=settings.MONGO_NAME)
         app_id = self.get_argument('app_id')
         sign_key = str(uuid.uuid4())
 
-        user = (yield tornado.gen.Task(
-            mongo_conn.users.find_one,
+        user = yield to_future(mongo_conn.users.find_one)(
             dict(
                 application_id=self.get_argument('app_id'),
-                email=self.get_argument('email')
+                email=self.get_argument('email'),
+                password=self.get_argument('hashed_pswd')
             )
-        )).args[0]
+        )
 
         if not user:
             self.set_status(401)
+            self.write(dict(status='error', message='unauthorized'))
             self.finish()
             return
 
-        yield tornado.gen.Task(
-            mongo_conn.credentials.update,
+        yield to_future(mongo_conn.credentials.update)(
             dict(application_id=app_id),
             dict(
                 application_id=app_id,
@@ -183,16 +223,15 @@ class TokenHandler(tornado.web.RequestHandler):
         self.finish()
 
 
-class RegisterHandler(tornado.web.RequestHandler):
+class RegisterHandler(ExceptionHandlerMixin, tornado.web.RequestHandler):
     SUPPORTED_METHODS = ('POST', )
 
     @tornado.web.asynchronous
     @tornado.gen.coroutine
     def post(self, *args, **kwargs):
-        mongo_conn = asyncmongo.Client(pool_id='credentials', host=MONGO_HOST, port=MONGO_PORT, dbname=MONGO_NAME)
+        mongo_conn = asyncmongo.Client(pool_id='credentials', host=settings.MONGO_HOST, port=settings.MONGO_PORT, dbname=settings.MONGO_NAME)
 
-        result = yield tornado.gen.Task(
-            mongo_conn.users.insert,
+        yield to_future(mongo_conn.users.insert)(
             dict(
                 application_id=self.get_argument('app_id'),
                 email=self.get_argument('email'),
@@ -201,12 +240,9 @@ class RegisterHandler(tornado.web.RequestHandler):
             safe=True
         )
 
-        if result.kwargs.get('error'):
-            self.send_error(status_code=400)
-            return
-
         self.set_status(200)
         self.finish()
+
 
 if __name__ == '__main__':
     application = tornado.web.Application([
@@ -215,11 +251,15 @@ if __name__ == '__main__':
         (r"/get_connection", TokenHandler),
     ])
     server = tornado.httpserver.HTTPServer(application)
-    server.listen(SERVER_PORT)
+    server.listen(settings.SERVER_PORT)
+
+    ioloop = tornado.ioloop.IOLoop.instance()
+    application.queue = QueueClient(ioloop)
+    application.queue.connect()
 
     logger = logging.getLogger('tornado.general')
     logger.setLevel(logging.DEBUG)
 
     logger_app.setLevel(logging.DEBUG)
 
-    tornado.ioloop.IOLoop.instance().start()
+    ioloop.start()
