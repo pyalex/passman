@@ -120,7 +120,7 @@ class PassManWebSocket(PassManActionMixin, tornado.websocket.WebSocketHandler):
 
     def generate_sign(self, records):
         return hashlib.sha1(
-            str(hashlib.md5(json.dumps(records or [])).hexdigest()) +
+            str(hashlib.md5(json.dumps(records or [], separators=(',', ':'))).hexdigest()) +
             str(hashlib.md5(self.sign_key or '').hexdigest())
         ).hexdigest()
 
