@@ -112,17 +112,17 @@ class PassManWebSocket(PassManActionMixin, ExceptionHandlerMixin, tornado.websoc
         self.storage = self.mongo_conn.connection(collectionname='records', dbname=settings.MONGO_NAME)
         credentials = self.mongo_conn.connection(collectionname='credentials', dbname=settings.MONGO_NAME)
 
-        user = (yield tornado.gen.Task(
+        user_credentials = (yield tornado.gen.Task(
             credentials.find_one,
             dict(auth_key=self.auth_key)
         )).args[0]
 
-        if not (user and self.auth_key):
-            self.write_error('Try authorize before')
+        if not (user_credentials and self.auth_key):
+            self.write_error('Try to authorize before')
             self.close()
 
-        self.user_id = str(user['user_id'])
-        self.sign_key = user['sign_key']
+        self.user_id = str(user_credentials['user_id'])
+        self.sign_key = user_credentials['sign_key']
 
         self.application.queue.add_event_listener(self, self.user_id)
         yield tornado.gen.Task(
@@ -177,7 +177,13 @@ class PassManWebSocket(PassManActionMixin, ExceptionHandlerMixin, tornado.websoc
 
         logger_app.info(action)
 
-        response = (yield self.actions[action](message, self.user_id)) or {}
+        try:
+            response = (yield self.actions[action](message, self.user_id)) or {}
+        except Exception as e:
+            logger_app.error(str(e))
+            self.write_error(str(e))
+            return
+
         response.update(status='success')
         self.write_message(response)
 
@@ -203,7 +209,6 @@ class TokenHandler(ExceptionHandlerMixin, tornado.web.RequestHandler):
 
         user = yield to_future(mongo_conn.users.find_one)(
             dict(
-                application_id=self.get_argument('app_id'),
                 email=self.get_argument('email'),
                 password=self.get_argument('hashed_pswd')
             )
@@ -216,7 +221,7 @@ class TokenHandler(ExceptionHandlerMixin, tornado.web.RequestHandler):
             return
 
         yield to_future(mongo_conn.credentials.update)(
-            dict(application_id=app_id),
+            dict(application_id=app_id, user_id=user['_id']),
             dict(
                 application_id=app_id,
                 user_id=user['_id'],
@@ -241,7 +246,6 @@ class RegisterHandler(ExceptionHandlerMixin, tornado.web.RequestHandler):
 
         yield to_future(mongo_conn.users.insert)(
             dict(
-                application_id=self.get_argument('app_id'),
                 email=self.get_argument('email'),
                 password=self.get_argument('hashed_pswd')
             ),
