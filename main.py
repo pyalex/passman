@@ -74,7 +74,28 @@ class PassManActionMixin(object):
         raise tornado.gen.Return(dict(upd_time=timestamp, records=records, sign=self.generate_sign(records)))
 
 
-class PassManWebSocket(PassManActionMixin, tornado.websocket.WebSocketHandler):
+class ExceptionHandlerMixin(object):
+    def _handle_request_exception(self, e):
+        if self._finished:
+            return
+
+        logger_app.error(str(e))
+
+        try:
+            raise e
+        except asyncmongo.errors.IntegrityError:
+            self.set_status(400)
+        except asyncmongo.errors.Error:
+            self.set_status(500)
+        except:
+            super(ExceptionHandlerMixin, self)._handle_request_exception(e)
+
+        if not self._finished:
+            self.write(dict(status='error', message=str(e)))
+            self.finish()
+
+
+class PassManWebSocket(PassManActionMixin, ExceptionHandlerMixin, tornado.websocket.WebSocketHandler):
     user_id = None
     sign_key = ''
 
@@ -82,7 +103,7 @@ class PassManWebSocket(PassManActionMixin, tornado.websocket.WebSocketHandler):
         tornado.websocket.WebSocketHandler.__init__(self, application, request, **kwargs)
 
         self.mongo_conn = asyncmongo.Client(pool_id='storage', host=settings.MONGO_HOST, port=settings.MONGO_PORT)
-        self.app_id = request.arguments.get('app_id')[0] if request.arguments.get('app_id') else None
+        self.auth_key = request.arguments.get('auth_key')[0] if request.arguments.get('auth_key') else None
         self.skip_notification = False
 
 
@@ -93,7 +114,7 @@ class PassManWebSocket(PassManActionMixin, tornado.websocket.WebSocketHandler):
 
         user = (yield tornado.gen.Task(
             credentials.find_one,
-            dict(application_id=self.app_id)
+            dict(auth_key=self.auth_key)
         )).args[0]
 
         if not user:
@@ -166,26 +187,6 @@ class PassManWebSocket(PassManActionMixin, tornado.websocket.WebSocketHandler):
         self.application.queue.remove_event_listener(self, self.user_id)
 
 
-
-class ExceptionHandlerMixin(object):
-    def _handle_request_exception(self, e):
-        if self._finished:
-            return
-
-        try:
-            raise e
-        except asyncmongo.errors.IntegrityError:
-            self.set_status(400)
-        except asyncmongo.errors.Error:
-            self.set_status(500)
-        except:
-            super(ExceptionHandlerMixin, self)._handle_request_exception(e)
-
-        if not self._finished:
-            self.write(dict(status='error', message=str(e)))
-            self.finish()
-
-
 class TokenHandler(ExceptionHandlerMixin, tornado.web.RequestHandler):
     SUPPORTED_METHODS = ('POST', )
 
@@ -195,6 +196,7 @@ class TokenHandler(ExceptionHandlerMixin, tornado.web.RequestHandler):
         mongo_conn = asyncmongo.Client(pool_id='credentials', host=settings.MONGO_HOST, port=settings.MONGO_PORT, dbname=settings.MONGO_NAME)
         app_id = self.get_argument('app_id')
         sign_key = str(uuid.uuid4())
+        auth_key = str(uuid.uuid4())
 
         user = yield to_future(mongo_conn.users.find_one)(
             dict(
@@ -216,12 +218,13 @@ class TokenHandler(ExceptionHandlerMixin, tornado.web.RequestHandler):
                 application_id=app_id,
                 user_id=user['_id'],
                 sign_key=sign_key,
+                auth_key=auth_key,
                 created_at=datetime.datetime.now()
             ),
             upsert=True
         )
 
-        self.write(dict(sign_key=sign_key, status='success'))
+        self.write(dict(sign_key=sign_key, auth_key=auth_key, status='success'))
         self.finish()
 
 
