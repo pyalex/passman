@@ -117,7 +117,7 @@ class PassManWebSocket(PassManActionMixin, ExceptionHandlerMixin, tornado.websoc
             dict(auth_key=self.auth_key)
         )).args[0]
 
-        if not user:
+        if not (user and self.auth_key):
             self.write_error('Try authorize before')
             self.close()
 
@@ -125,6 +125,9 @@ class PassManWebSocket(PassManActionMixin, ExceptionHandlerMixin, tornado.websoc
         self.sign_key = user['sign_key']
 
         self.application.queue.add_event_listener(self, self.user_id)
+        yield tornado.gen.Task(
+            credentials.remove, 
+            dict(auth_key=self.auth_key))
 
     def on_notify(self, message):
         if self.skip_notification:
