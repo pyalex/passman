@@ -37,15 +37,19 @@ class PassManActionMixin(object):
     def update(self, message, user_id):
         dt = datetime.datetime.now()
         for record_id, data in message.get('records', []):
+            to_write = dict(record_id=record_id,
+                            user_id=ObjectId(user_id),
+                            updated_at=dt)
+            if data:
+                to_write['data'] = data
+                to_write['deleted'] = 0
+            else:
+                to_write['deleted'] = 1
+
             yield tornado.gen.Task(
                 self.storage.update,
                 dict(record_id=record_id, user_id=ObjectId(user_id)),
-                dict(
-                    record_id=record_id,
-                    user_id=ObjectId(user_id),
-                    data=data,
-                    updated_at=dt
-                ),
+                to_write,
                 upsert=True
             )
 
@@ -69,7 +73,8 @@ class PassManActionMixin(object):
 
         records = []
         for row in rows:
-            records.append((row['record_id'], row['data']))
+            data = (not row.get('deleted') and row['data']) or ''
+            records.append((row['record_id'], data))
 
         raise tornado.gen.Return(dict(upd_time=timestamp, records=records, sign=self.generate_sign(records)))
 
