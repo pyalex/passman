@@ -142,7 +142,7 @@ class PassManWebSocket(PassManActionMixin, ExceptionHandlerMixin, tornado.websoc
         self.skip_notification = False
 
     def send_notification(self, dt):
-        self.skip_notification = True
+        self.skip_notification = False
         self.application.queue.send_notification(self.user_id, dict(
             new=int(time.mktime(dt.timetuple()))
         ))
